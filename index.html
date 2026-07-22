@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VS Code Open Chat</title>
+<style>
+    body, html {
+        margin: 0; padding: 0; height: 100vh;
+        background-color: #1e1e1e; color: #cccccc;
+        font-family: 'Consolas', 'Courier New', monospace;
+        font-size: 14px; display: flex; flex-direction: column;
+    }
+    
+    #terminal-header {
+        background-color: #252526; padding: 8px 15px; color: #9cdcfe;
+        border-bottom: 1px solid #333; display: flex; justify-content: space-between;
+    }
+
+    #terminal {
+        flex: 1; display: flex; flex-direction: column;
+        padding: 10px; overflow: hidden; cursor: text;
+    }
+
+    #output {
+        flex: 1; overflow-y: auto; display: flex; flex-direction: column;
+        word-break: break-all; margin-bottom: 10px;
+    }
+
+    .log-line { margin: 2px 0; line-height: 1.4; }
+    .sys-msg { color: #569cd6; } /* Blue */
+    .bot-msg { color: #d7ba7d; } /* Yellow */
+    .err-msg { color: #f44747; } /* Red */
+    .chat-name { color: #4ec9b0; font-weight: bold; } /* Teal */
+    .my-name { color: #c586c0; font-weight: bold; } /* Purple */
+    
+    #input-container { display: flex; align-items: center; }
+    #prompt-prefix { color: #ce9178; margin-right: 8px; white-space: nowrap; }
+    
+    #cmd-input {
+        flex: 1; background: transparent; border: none;
+        color: #cccccc; font-family: 'Consolas', 'Courier New', monospace;
+        font-size: 14px; outline: none; padding: 0;
+    }
+    
+    ::-webkit-scrollbar { width: 10px; }
+    ::-webkit-scrollbar-track { background: #1e1e1e; }
+    ::-webkit-scrollbar-thumb { background: #424242; }
+    ::-webkit-scrollbar-thumb:hover { background: #4f4f4f; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.4.7/dist/peerjs.min.js"></script>
+</head>
+<body>
+
+<div id="terminal-header">
+    <span>TERMINAL - Open Chat (Mesh Network)</span>
+    <span id="status-indicator">Connecting...</span>
+</div>
+
+<div id="terminal" onclick="document.getElementById('cmd-input').focus()">
+    <div id="output"></div>
+    <div id="input-container">
+        <span id="prompt-prefix">C:\Users\Guest></span>
+        <input type="text" id="cmd-input" autocomplete="off" autofocus />
+    </div>
+</div>
+
+<script>
+    // System Constants
+    const PEER_PREFIX = "vscode_chat_16char_x9a8f_"; 
+    const SLOTS = ["alpha", "beta", "gamma", "delta", "epsilon"];
+    
+    // Application State
+    let mySlot = null;
+    let peer = null;
+    let connections = {};
+    let isAuthorized = false;
+    
+    // Permission State
+    let pendingCommand = null;
+    let autoAllowedUsers = {};
+
+    // DOM Elements
+    const output = document.getElementById('output');
+    const input = document.getElementById('cmd-input');
+    const promptPrefix = document.getElementById('prompt-prefix');
+    const statusIndicator = document.getElementById('status-indicator');
+
+    // Logging utility
+    function printLog(htmlContent) {
+        const div = document.createElement('div');
+        div.className = 'log-line';
+        div.innerHTML = htmlContent;
+        output.appendChild(div);
+        output.scrollTop = output.scrollHeight;
+    }
+
+    function printSys(msg) { printLog(`<span class="sys-msg">[SYSTEM]</span> ${msg}`); }
+    function printBot(msg) { printLog(`<span class="bot-msg">[BOT]</span> ${msg}`); }
+    function printErr(msg) { printLog(`<span class="err-msg">[ERROR]</span> ${msg}`); }
+
+    // Mesh Network Initialization
+    function tryConnect(index) {
+        if (index >= SLOTS.length) {
+            printErr("Room is full. Maximum 5 users allowed.");
+            statusIndicator.innerText = "Connection Failed";
+            return;
+        }
+
+        let candidate = SLOTS[index];
+        let tempPeer = new Peer(PEER_PREFIX + candidate, {
+            debug: 1,
+            config: {
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            }
+        });
+
+        tempPeer.on('open', (id) => {
+            mySlot = candidate;
+            peer = tempPeer;
+            statusIndicator.innerText = `Online as ${mySlot.toUpperCase()}`;
+            promptPrefix.innerText = `C:\\Users\\${mySlot.toUpperCase()}>`;
+            
+            printSys(`Successfully connected to the mesh network.`);
+            printSys(`Assigned Identity: <span class="my-name">${mySlot.toUpperCase()}</span>`);
+            printSys(`Available targets: @alpha, @beta, @gamma, @delta, @epsilon`);
+            printSys(`Type your message and press Enter. Commands require authentication.`);
+            printSys(`--------------------------------------------------------------`);
+
+            connectToPeers();
+            setupIncomingConnections();
+        });
+
+        tempPeer.on('error', (err) => {
+            if (err.type === 'unavailable-id') {
+                tempPeer.destroy();
+                tryConnect(index + 1); // ID taken, try next slot
+            } else {
+                printErr(`PeerJS Error: ${err.type}`);
+            }
+        });
+    }
+
+    function connectToPeers() {
+        SLOTS.forEach(slot => {
+            if (slot !== mySlot) {
+                let conn = peer.connect(PEER_PREFIX + slot, { reliable: true });
+                setupConnEvents(conn, slot);
+            }
+        });
+    }
+
+    function setupIncomingConnections() {
+        peer.on('connection', conn => {
+            let slot = conn.peer.replace(PEER_PREFIX, '');
+            setupConnEvents(conn, slot);
+        });
+    }
+
+    function setupConnEvents(conn, slot) {
+        conn.on('open', () => {
+            if (!connections[slot]) {
+                connections[slot] = conn;
+                printSys(`<span class="chat-name">${slot.toUpperCase()}</span> joined the terminal session.`);
+            }
+        });
+
+        conn.on('data', data => {
+            handleIncomingData(data, slot);
+        });
+
+        conn.on('close', () => {
+            if (connections[slot]) {
+                delete connections[slot];
+                printSys(`<span class="chat-name">${slot.toUpperCase()}</span> disconnected.`);
+            }
+        });
+        
+        conn.on('error', () => {
+             delete connections[slot];
+        });
+    }
+
+    function broadcast(data) {
+        Object.values(connections).forEach(conn => {
+            if (conn && conn.open) conn.send(data);
+        });
+    }
+
+    // Input Handling
+    input.addEventListener('keypress', e => {
+        if (e.key === 'Enter') {
+            let text = input.value.trim();
+            if (!text) return;
+            input.value = '';
+            processInput(text);
+        }
+    });
+
+    function processInput(text) {
+        // 1. Handle interactive prompt mode (Allow/Deny/Always)
+        if (pendingCommand) {
+            handlePromptResponse(text.toLowerCase());
+            return;
+        }
+
+        // 2. Check for Auth validation
+        let authMatch = text.match(/#pass\s*=\s*vishal1454\s*and\s*#opt\s*=\s*(\d{2}:\d{2})/i);
+        if (authMatch) {
+            let inputTime = authMatch[1];
+            let now = new Date();
+            let hh = String(now.getHours()).padStart(2, '0');
+            let mm = String(now.getMinutes()).padStart(2, '0');
+            
+            printLog(`<span class="my-name">[YOU]</span> ${text}`); // Echo command
+            
+            if (inputTime === `${hh}:${mm}`) {
+                isAuthorized = true;
+                printBot("Authorization accepted. Remote execution capabilities unlocked.");
+            } else {
+                printErr(`Authorization failed. Time mismatch (Server time: ${hh}:${mm}).`);
+            }
+            return;
+        }
+
+        // 3. Check for execution command (e.g., @beta #ceoveride( alert(1) ) )
+        let cmdMatch = text.match(/@(\w+)\s+#ceoveride\((.*)\)/i);
+        if (cmdMatch) {
+            printLog(`<span class="my-name">[YOU]</span> ${text}`);
+            
+            if (!isAuthorized) {
+                printErr("Access Denied. You must authenticate first to use #ceoveride.");
+                return;
+            }
+
+            let target = cmdMatch[1].toLowerCase();
+            let code = cmdMatch[2].trim();
+
+            if (!SLOTS.includes(target) && target !== 'all') {
+                printErr(`Target user '${target}' not recognized.`);
+                return;
+            }
+
+            let payload = { type: 'ceoveride', target: target, code: code, from: mySlot };
+            
+            if (target === 'all') {
+                broadcast(payload);
+                printBot(`Execution request broadcasted to ALL targets.`);
+            } else if (connections[target]) {
+                connections[target].send(payload);
+                printBot(`Execution request sent to ${target.toUpperCase()}.`);
+            } else {
+                printErr(`Target ${target.toUpperCase()} is not currently connected.`);
+            }
+            return;
+        }
+
+        // 4. Standard Chat
+        printLog(`<span class="my-name">[YOU]</span> ${text.replace(/</g, "&lt;").replace(/>/g, "&gt;")}`);
+        broadcast({ type: 'chat', text: text, from: mySlot });
+    }
+
+    // Data Routing
+    function handleIncomingData(data, fromSlot) {
+        if (data.type === 'chat') {
+            printLog(`<span class="chat-name">[${fromSlot.toUpperCase()}]</span> ${data.text.replace(/</g, "&lt;").replace(/>/g, "&gt;")}`);
+        } 
+        else if (data.type === 'ceoveride') {
+            if (data.target === mySlot || data.target === 'all') {
+                if (autoAllowedUsers[fromSlot]) {
+                    printBot(`Auto-executing command from ${fromSlot.toUpperCase()}...`);
+                    executeJs(data.code, fromSlot);
+                } else {
+                    // Trigger Interactive Prompt Mode
+                    pendingCommand = { code: data.code, from: fromSlot };
+                    printBot(`<span class="chat-name">${fromSlot.toUpperCase()}</span> is attempting to execute JavaScript on your client:`);
+                    printLog(`<span style="color:#dcdcaa">>> ${data.code.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</span>`);
+                    printBot(`Allow execution? (y = Yes, n = No, a = Always allow for ${fromSlot.toUpperCase()})`);
+                    promptPrefix.innerText = `[BOT-PROMPT]>`;
+                    promptPrefix.style.color = '#d7ba7d';
+                }
+            }
+        } 
+        else if (data.type === 'cmd_result') {
+            printBot(`Result from ${fromSlot.toUpperCase()}: ${data.result}`);
+        }
+    }
+
+    function handlePromptResponse(res) {
+        let cmd = pendingCommand;
+        
+        if (res === 'y') {
+            printLog(`<span class="my-name">[YOU]</span> Yes`);
+            executeJs(cmd.code, cmd.from);
+            resetPrompt();
+        } else if (res === 'a') {
+            printLog(`<span class="my-name">[YOU]</span> Always Allow`);
+            autoAllowedUsers[cmd.from] = true;
+            printBot(`Added ${cmd.from.toUpperCase()} to trusted users.`);
+            executeJs(cmd.code, cmd.from);
+            resetPrompt();
+        } else if (res === 'n') {
+            printLog(`<span class="my-name">[YOU]</span> No`);
+            printBot("Execution blocked by user.");
+            
+            if (connections[cmd.from]) {
+                connections[cmd.from].send({ type: 'cmd_result', result: 'Blocked by target.', from: mySlot });
+            }
+            resetPrompt();
+        } else {
+            printBot("Invalid input. Type 'y', 'n', or 'a'.");
+        }
+    }
+
+    function resetPrompt() {
+        pendingCommand = null;
+        promptPrefix.innerText = `C:\\Users\\${mySlot.toUpperCase()}>`;
+        promptPrefix.style.color = '#ce9178';
+    }
+
+    function executeJs(code, fromSlot) {
+        try {
+            // Evaluates in the global scope 
+            let result = window.eval(code); 
+            printBot("Code executed successfully.");
+            
+            // Optionally notify sender of successful execution return value
+            if (connections[fromSlot]) {
+                connections[fromSlot].send({ 
+                    type: 'cmd_result', 
+                    result: result !== undefined ? String(result) : "Success (No return value)", 
+                    from: mySlot 
+                });
+            }
+        } catch (e) {
+            printErr(`Execution Failed: ${e.message}`);
+            if (connections[fromSlot]) {
+                connections[fromSlot].send({ type: 'cmd_result', result: `Error: ${e.message}`, from: mySlot });
+            }
+        }
+    }
+
+    // Initialize application
+    printSys("Initializing local environment...");
+    tryConnect(0);
+
+</script>
+</body>
+</html>
